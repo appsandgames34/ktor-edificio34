@@ -32,5 +32,7 @@ dependencies {
     implementation(libs.ktor.server.config.yaml)
     testImplementation(libs.ktor.server.test.host)
     testImplementation(libs.kotlin.test.junit)
-
+    // Dependencia para BCrypt
+    implementation("org.mindrot:jbcrypt:0.4")
+    implementation(libs.ktor.server.websockets)
 }

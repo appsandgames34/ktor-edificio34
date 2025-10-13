@@ -8,10 +8,16 @@ import io.ktor.server.routing.*
 
 fun Application.configureRouting() {
     routing {
+        // Rutas públicas
         userRoutes()
+
+        // Rutas protegidas (requieren JWT)
         authenticate("auth-jwt") {
             gameRoutes()
             chatRoutes()
         }
+
+        // WebSocket (puede requerir autenticación adicional si lo deseas)
+        webSocketRoutes()
     }
 }

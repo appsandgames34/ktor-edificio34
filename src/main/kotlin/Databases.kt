@@ -1,32 +1,10 @@
 package com.appsandgames34
 
-import com.appsandgames34.modelos.Cards
-import com.appsandgames34.modelos.ChatMessages
-import com.appsandgames34.modelos.GameDecks
-import com.appsandgames34.modelos.GamePlayers
-import com.appsandgames34.modelos.Games
-import com.appsandgames34.modelos.PlayerHands
-import com.appsandgames34.modelos.Users
-import com.fasterxml.jackson.databind.*
-import io.ktor.client.*
-import io.ktor.client.engine.apache.*
-import io.ktor.http.*
-import io.ktor.serialization.jackson.*
-import io.ktor.serialization.kotlinx.json.*
+import com.appsandgames34.modelos.*
+import com.appsandgames34.util.CardInitializer
 import io.ktor.server.application.*
-import io.ktor.server.auth.*
-import io.ktor.server.plugins.calllogging.*
-import io.ktor.server.plugins.contentnegotiation.*
-import io.ktor.server.plugins.cors.routing.*
-import io.ktor.server.request.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
-import io.ktor.server.sessions.*
-import java.sql.Connection
-import java.sql.DriverManager
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.transactions.transaction
-import org.slf4j.event.*
 
 lateinit var database: Database
 
@@ -37,14 +15,23 @@ fun Application.configureDatabases() {
         password = environment.config.property("postgres.password").getString(),
         driver = "org.postgresql.Driver"
     )
+
     transaction(database) {
-        // 1. Create all Independent Parent Tables (Users MUST be here)
+        // Habilitar logs SQL (opcional, útil para desarrollo)
+        addLogger(StdOutSqlLogger)
+
+        // 1. Crear tablas independientes primero
         SchemaUtils.create(Users, Games, Cards)
 
-        // 2. Create GamePlayers, which references Users.
+        // 2. Crear tablas que dependen de las anteriores
         SchemaUtils.create(GamePlayers)
 
-        // 3. Create the rest.
+        // 3. Crear el resto de tablas
         SchemaUtils.create(ChatMessages, GameDecks, PlayerHands)
     }
+
+    // Inicializar las 20 cartas del juego
+    CardInitializer.initializeCards()
+
+    println("Base de datos configurada y cartas inicializadas correctamente")
 }
