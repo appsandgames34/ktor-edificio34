@@ -24,7 +24,6 @@ import org.jetbrains.exposed.sql.wrapAsExpression
 // --- Data Classes ---
 data class CreateGameRequest(val maxPlayers: Int, val isPublic: Boolean = true)
 data class JoinByCodeRequest(val code: String)
-data class PlayCardRequest(val cardId: Int, val targetPlayerId: String?)
 data class CounterCardRequest(val turnPlayerId: String, val cardId: Int)
 data class RollDiceRequest(val gameId: String)
 data class ReadyRequest(val gameId: String)

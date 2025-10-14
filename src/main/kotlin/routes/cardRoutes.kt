@@ -201,14 +201,16 @@ fun Route.cardRoutes() {
         get("/info") {
             try {
                 val cardsInfo = transaction {
-                    Cards.selectAll().map {
-                        mapOf(
-                            "id" to it[Cards.id],
-                            "name" to it[Cards.name],
-                            "description" to it[Cards.description],
-                            "properties" to it[Cards.properties]
-                        )
-                    }
+                    Cards.selectAll()
+                        .orderBy(Cards.id)
+                        .map {
+                            mapOf(
+                                "id" to it[Cards.id],
+                                "name" to it[Cards.name],
+                                "description" to it[Cards.description],
+                                "properties" to it[Cards.properties]
+                            )
+                        }
                 }
                 call.respond(cardsInfo)
             } catch (e: Exception) {
@@ -223,7 +225,8 @@ fun Route.cardRoutes() {
                     ?: throw IllegalArgumentException("ID de carta inválido")
 
                 val cardInfo = transaction {
-                    Cards.select(Cards.id eq cardId)
+                    Cards.selectAll()
+                        .where { Cards.id eq cardId }
                         .map {
                             mapOf(
                                 "id" to it[Cards.id],

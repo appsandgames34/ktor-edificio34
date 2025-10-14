@@ -5,8 +5,6 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -45,7 +43,9 @@ fun Route.boardRoutes() {
                 }
 
                 val square = transaction {
-                    BoardSquares.select ( BoardSquares.position eq position )
+                    BoardSquares
+                        .selectAll()
+                        .where { BoardSquares.position eq position }
                         .map {
                             mapOf(
                                 "position" to it[BoardSquares.position],
@@ -72,7 +72,9 @@ fun Route.boardRoutes() {
         get("/special-squares") {
             try {
                 val specialSquares = transaction {
-                    BoardSquares.select ( BoardSquares.type neq "NORMAL" )
+                    BoardSquares
+                        .selectAll()
+                        .where { BoardSquares.type neq "NORMAL" }
                         .orderBy(BoardSquares.position)
                         .map {
                             mapOf(
@@ -93,7 +95,9 @@ fun Route.boardRoutes() {
         get("/elevator-landings") {
             try {
                 val elevatorLandings = transaction {
-                    BoardSquares.select ( BoardSquares.type eq "ELEVATOR_LANDING" )
+                    BoardSquares
+                        .selectAll()
+                        .where { BoardSquares.type eq "ELEVATOR_LANDING" }
                         .orderBy(BoardSquares.position)
                         .map {
                             mapOf(
