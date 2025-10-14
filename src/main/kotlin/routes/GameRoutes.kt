@@ -14,6 +14,12 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.LocalDateTime
 import java.util.*
+import org.jetbrains.exposed.sql.Expression
+import org.jetbrains.exposed.sql.Column
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.wrap as wrapAsExpression
+import org.jetbrains.exposed.sql.wrapAsExpression
+
 
 // --- Data Classes ---
 data class CreateGameRequest(val maxPlayers: Int, val isPublic: Boolean = true)
@@ -34,7 +40,10 @@ fun Route.gameRoutes() {
                 val req = call.receive<CreateGameRequest>()
 
                 if (req.maxPlayers !in 2..6) {
-                    call.respondText("El número de jugadores debe estar entre 2 y 6", status = HttpStatusCode.BadRequest)
+                    call.respondText(
+                        "El número de jugadores debe estar entre 2 y 6",
+                        status = HttpStatusCode.BadRequest
+                    )
                     return@post
                 }
 
@@ -76,8 +85,8 @@ fun Route.gameRoutes() {
                         it[GamePlayers.createdAt] = LocalDateTime.now()
                     }
 
-                    // Crear mazo de cartas para la partida
-                    val deck = (1..20).flatMap { cardId -> List(5) { cardId } }.shuffled()
+                    // Crear mazo de cartas para la partida (21 tipos x 5 copias = 105 cartas)
+                    val deck = (1..21).flatMap { cardId -> List(5) { cardId } }.shuffled()
                     GameDecks.insert {
                         it[GameDecks.id] = UUID.randomUUID()
                         it[GameDecks.gameId] = newGameId
@@ -114,13 +123,18 @@ fun Route.gameRoutes() {
                     }
 
                     // Buscar partida pública con espacio disponible
-                    val availableGame = Games
-                        .leftJoin(GamePlayers)
-                        .select(Games.status eq "WAITING")
-                        .groupBy(Games.id, Games.code, Games.maxPlayers)
-                        .having { GamePlayers.id.count() less Games.maxPlayers }
-                        .map { it[Games.id] to it[Games.code] }
-                        .firstOrNull()
+                    val waitingGames = Games
+                        .select ( Games.status eq "WAITING" )
+                        .toList()
+
+                    val availableGame = waitingGames.firstOrNull { game ->
+                        val gameId = game[Games.id]
+                        val maxPlayers = game[Games.maxPlayers]
+                        val currentPlayers = GamePlayers
+                            .select ( GamePlayers.gameId eq gameId )
+                            .count()
+                        currentPlayers < maxPlayers
+                    }?.let { it[Games.id] to it[Games.code] }
 
                     if (availableGame != null) {
                         // Unirse a partida existente
@@ -187,7 +201,6 @@ fun Route.gameRoutes() {
                             it[GameDecks.discard] = ""
                             it[GameDecks.createdAt] = LocalDateTime.now()
                         }
-
                         mapOf("gameId" to newGameId.toString(), "code" to gameCode, "created" to true)
                     }
                 }
@@ -475,26 +488,34 @@ fun Route.gameRoutes() {
 
         // LISTAR PARTIDAS DISPONIBLES
         get("/available") {
+
             try {
                 val games = transaction {
                     Games
-                        .leftJoin(GamePlayers)
-                        .select(Games.status eq "WAITING")
-                        .groupBy(Games.id, Games.code, Games.maxPlayers, Games.createdAt)
-                        .having { GamePlayers.id.count() less Games.maxPlayers }
-                        .map {
-                            mapOf(
-                                "id" to it[Games.id].toString(),
-                                "code" to it[Games.code],
-                                "maxPlayers" to it[Games.maxPlayers],
-                                "currentPlayers" to (it[GamePlayers.id.count()] ?: 0)
-                            )
+                        .select ( Games.status eq "WAITING" )
+                        .mapNotNull { game ->
+                            val gameId = game[Games.id]
+                            val currentPlayers = GamePlayers
+                                .select ( GamePlayers.gameId eq gameId )
+                                .count()
+                            val maxPlayers = game[Games.maxPlayers]
+
+                            if (currentPlayers < maxPlayers) {
+                                mapOf(
+                                    "id" to gameId.toString(),
+                                    "code" to game[Games.code],
+                                    "maxPlayers" to maxPlayers,
+                                    "currentPlayers" to currentPlayers
+                                )
+                            } else null
                         }
                 }
                 call.respond(games)
             } catch (e: Exception) {
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
+
+
         }
     }
 }

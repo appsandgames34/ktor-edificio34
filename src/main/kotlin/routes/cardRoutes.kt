@@ -178,7 +178,7 @@ fun Route.cardRoutes() {
 
                     // Actualizar el mazo
                     GameDecks.update({ GameDecks.gameId eq gameId }) {
-                        it[deckCards] = deckCards.joinToString(",")
+                        it[GameDecks.deckCards] = deckCards.joinToString(",")
                     }
 
                     mapOf(

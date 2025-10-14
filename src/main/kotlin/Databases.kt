@@ -30,8 +30,10 @@ fun Application.configureDatabases() {
         SchemaUtils.create(ChatMessages, GameDecks, PlayerHands)
     }
 
-    // Inicializar las 20 cartas del juego
+    // Inicializar las 21 cartas y 112 casillas del juego
     CardInitializer.initializeCards()
+    CardInitializer.initializeBoardSquares()
+
 
     println("Base de datos configurada y cartas inicializadas correctamente")
 }
