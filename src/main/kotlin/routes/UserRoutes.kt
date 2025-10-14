@@ -38,9 +38,9 @@ fun Route.userRoutes() {
                 }
 
                 val exists = transaction {
-                    Users.select (
-                        (Users.username eq req.username) or (Users.email eq req.email)
-                    ).count() > 0
+                    Users.selectAll()
+                        .where { (Users.username eq req.username) or (Users.email eq req.email) }
+                        .count() > 0
                 }
 
                 if (exists) {
@@ -79,9 +79,11 @@ fun Route.userRoutes() {
         post("/login") {
             try {
                 val req = call.receive<LoginRequest>()
-
-                val user = transaction {
-                    Users.select ( Users.username eq req.username )
+              val user = transaction {
+                    // 1. Usar selectAll() para traer todas las columnas de Users.
+                    // 2. Usar where para filtrar.
+                    Users.selectAll()
+                        .where { Users.username eq req.username }
                         .map { row ->
                             Triple(
                                 row[Users.id],

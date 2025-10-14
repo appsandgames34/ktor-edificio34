@@ -8,6 +8,5 @@ object BoardSquares : Table("board_squares") {
     val type = varchar("type", 30) // NORMAL, ENTRANCE, LANDING, FLOOR_LANDING, ELEVATOR_LANDING
     val floor = integer("floor").nullable() // Número de planta (null para casillas normales)
     val description = varchar("description", 200)
-
     override val primaryKey = PrimaryKey(position)
 }

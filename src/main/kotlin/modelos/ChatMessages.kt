@@ -8,6 +8,5 @@ object ChatMessages : Table("chat_messages") {
     val playerId = uuid("player_id").references(GamePlayers.id).nullable()
     val message = text("message")
     val createdAt = datetime("created_at")
-
     override val primaryKey = PrimaryKey(id)
 }

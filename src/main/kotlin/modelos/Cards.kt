@@ -7,6 +7,5 @@ object Cards : Table("cards") {
     val name = varchar("name", 100)
     val description = text("description")
     val properties = text("properties") // json string
-
     override val primaryKey = PrimaryKey(id)
 }
