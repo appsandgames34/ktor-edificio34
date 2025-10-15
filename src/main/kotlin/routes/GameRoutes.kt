@@ -15,14 +15,78 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.LocalDateTime
 import java.util.*
 
-
-
 // --- Data Classes ---
 data class CreateGameRequest(val maxPlayers: Int, val isPublic: Boolean = true)
 data class JoinByCodeRequest(val code: String)
 data class CounterCardRequest(val turnPlayerId: String, val cardId: Int)
 data class RollDiceRequest(val gameId: String)
 data class ReadyRequest(val gameId: String)
+
+// Función auxiliar para iniciar partida automáticamente cuando se llena
+private fun startGameIfFull(gameId: UUID) {
+    val players = GamePlayers
+        .selectAll()
+        .where { GamePlayers.gameId eq gameId }
+        .toList()
+
+    val game = Games
+        .selectAll()
+        .where { Games.id eq gameId }
+        .singleOrNull() ?: return
+
+    val maxPlayers = game[Games.maxPlayers]
+    val currentPlayers = players.count()
+
+    // Si la partida está llena, iniciarla automáticamente
+    if (currentPlayers >= maxPlayers && game[Games.status] == "WAITING") {
+        println("🎮 Partida llena! Iniciando automáticamente... (${currentPlayers}/${maxPlayers})")
+
+        // Marcar a todos como listos
+        GamePlayers.update({ GamePlayers.gameId eq gameId }) {
+            it[GamePlayers.isReady] = true
+        }
+
+        // Iniciar partida
+        Games.update({ Games.id eq gameId }) {
+            it[Games.isStarted] = true
+            it[Games.status] = "IN_PROGRESS"
+            it[Games.currentTurnIndex] = 0
+            it[Games.updatedAt] = LocalDateTime.now()
+        }
+
+        // Repartir 3 cartas a cada jugador
+        val deck = GameDecks
+            .selectAll()
+            .where { GameDecks.gameId eq gameId }
+            .single()[GameDecks.deckCards]
+            .split(",")
+            .map { it.toInt() }
+            .toMutableList()
+
+        players.forEach { player ->
+            val hand = mutableListOf<Int>()
+            repeat(3) {
+                if (deck.isNotEmpty()) {
+                    hand.add(deck.removeFirst())
+                }
+            }
+
+            PlayerHands.insert {
+                it[PlayerHands.id] = UUID.randomUUID()
+                it[PlayerHands.gameId] = gameId
+                it[PlayerHands.playerId] = player[GamePlayers.id]
+                it[PlayerHands.cards] = hand.joinToString(",")
+            }
+        }
+
+        // Actualizar mazo
+        GameDecks.update({ GameDecks.gameId eq gameId }) {
+            it[GameDecks.deckCards] = deck.joinToString(",")
+        }
+
+        println("✅ Partida iniciada automáticamente!")
+    }
+}
 
 fun Route.gameRoutes() {
     route("/games") {
@@ -48,8 +112,9 @@ fun Route.gameRoutes() {
                 transaction {
                     // Verificar si el usuario ya está en otra partida activa
                     val userInAnotherGame = GamePlayers
-                        .join(Games, JoinType.INNER, additionalConstraint = { GamePlayers.gameId eq Games.id })
-                        .select((GamePlayers.userId eq userId) and (Games.status neq "FINISHED"))
+                        .innerJoin(Games)
+                        .selectAll()
+                        .where { (GamePlayers.userId eq userId) and (Games.status neq "FINISHED") }
                         .any()
 
                     if (userInAnotherGame) {
@@ -96,6 +161,8 @@ fun Route.gameRoutes() {
             } catch (e: IllegalStateException) {
                 call.respondText(e.message ?: "Error de validación", status = HttpStatusCode.BadRequest)
             } catch (e: Exception) {
+                println("❌ Error en /games/create: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error al crear partida: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
@@ -109,8 +176,9 @@ fun Route.gameRoutes() {
                 val result = transaction {
                     // Verificar si el usuario ya está en una partida activa
                     val userInAnotherGame = GamePlayers
-                        .join(Games, JoinType.INNER, additionalConstraint = { GamePlayers.gameId eq Games.id })
-                        .select((GamePlayers.userId eq userId) and (Games.status neq "FINISHED"))
+                        .innerJoin(Games)
+                        .selectAll()
+                        .where { (GamePlayers.userId eq userId) and (Games.status neq "FINISHED") }
                         .any()
 
                     if (userInAnotherGame) {
@@ -119,14 +187,16 @@ fun Route.gameRoutes() {
 
                     // Buscar partida pública con espacio disponible
                     val waitingGames = Games
-                        .select ( Games.status eq "WAITING" )
+                        .selectAll()
+                        .where { Games.status eq "WAITING" }
                         .toList()
 
                     val availableGame = waitingGames.firstOrNull { game ->
                         val gameId = game[Games.id]
                         val maxPlayers = game[Games.maxPlayers]
                         val currentPlayers = GamePlayers
-                            .select ( GamePlayers.gameId eq gameId )
+                            .selectAll()
+                            .where { GamePlayers.gameId eq gameId }
                             .count()
                         currentPlayers < maxPlayers
                     }?.let { it[Games.id] to it[Games.code] }
@@ -135,10 +205,14 @@ fun Route.gameRoutes() {
                         // Unirse a partida existente
                         val (gameId, gameCode) = availableGame
 
-                        val usedIndices = GamePlayers.select(GamePlayers.gameId eq gameId)
+                        val usedIndices = GamePlayers
+                            .selectAll()
+                            .where { GamePlayers.gameId eq gameId }
                             .map { it[GamePlayers.playerIndex] }
 
-                        val usedCharacters = GamePlayers.select(GamePlayers.gameId eq gameId)
+                        val usedCharacters = GamePlayers
+                            .selectAll()
+                            .where { GamePlayers.gameId eq gameId }
                             .map { it[GamePlayers.character] }
 
                         val availableIndex = (0..5).firstOrNull { it !in usedIndices }
@@ -158,6 +232,9 @@ fun Route.gameRoutes() {
                             it[GamePlayers.connected] = true
                             it[GamePlayers.createdAt] = LocalDateTime.now()
                         }
+
+                        // Verificar si la partida se llenó e iniciarla automáticamente
+                        startGameIfFull(gameId)
 
                         mapOf("gameId" to gameId.toString(), "code" to gameCode, "created" to false)
                     } else {
@@ -188,7 +265,7 @@ fun Route.gameRoutes() {
                         }
 
                         // Crear mazo
-                        val deck = (1..20).flatMap { cardId -> List(5) { cardId } }.shuffled()
+                        val deck = (1..21).flatMap { cardId -> List(5) { cardId } }.shuffled()
                         GameDecks.insert {
                             it[GameDecks.id] = UUID.randomUUID()
                             it[GameDecks.gameId] = newGameId
@@ -205,12 +282,14 @@ fun Route.gameRoutes() {
             } catch (e: IllegalStateException) {
                 call.respondText(e.message ?: "Error de validación", status = HttpStatusCode.BadRequest)
             } catch (e: Exception) {
+                println("❌ Error en /games/find-or-create: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
 
         // UNIRSE POR CÓDIGO
-        post("/join") {
+        post("c/join") {
             try {
                 val principal = call.principal<JWTPrincipal>()
                 val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
@@ -219,15 +298,19 @@ fun Route.gameRoutes() {
                 transaction {
                     // Verificar si el usuario ya está en otra partida activa
                     val userInAnotherGame = GamePlayers
-                        .join(Games, JoinType.INNER, additionalConstraint = { GamePlayers.gameId eq Games.id })
-                        .select((GamePlayers.userId eq userId) and (Games.status neq "FINISHED"))
+                        .innerJoin(Games)
+                        .selectAll()
+                        .where { (GamePlayers.userId eq userId) and (Games.status neq "FINISHED") }
                         .any()
 
                     if (userInAnotherGame) {
                         throw IllegalStateException("Ya estás en otra partida activa")
                     }
 
-                    val game = Games.select(Games.code eq req.code.uppercase()).singleOrNull()
+                    val game = Games
+                        .selectAll()
+                        .where { Games.code eq req.code.uppercase() }
+                        .singleOrNull()
                         ?: throw NoSuchElementException("Partida no encontrada")
 
                     val gameId = game[Games.id]
@@ -236,15 +319,22 @@ fun Route.gameRoutes() {
                         throw IllegalStateException("La partida ya ha comenzado")
                     }
 
-                    val playerCount = GamePlayers.select(GamePlayers.gameId eq gameId).count()
+                    val playerCount = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
+                        .count()
                     if (playerCount >= game[Games.maxPlayers]) {
                         throw IllegalStateException("La partida está llena")
                     }
 
-                    val usedIndices = GamePlayers.select(GamePlayers.gameId eq gameId)
+                    val usedIndices = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
                         .map { it[GamePlayers.playerIndex] }
 
-                    val usedCharacters = GamePlayers.select(GamePlayers.gameId eq gameId)
+                    val usedCharacters = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
                         .map { it[GamePlayers.character] }
 
                     val availableIndex = (0 until game[Games.maxPlayers]).firstOrNull { it !in usedIndices }
@@ -264,6 +354,9 @@ fun Route.gameRoutes() {
                         it[GamePlayers.connected] = true
                         it[GamePlayers.createdAt] = LocalDateTime.now()
                     }
+
+                    // Verificar si la partida se llenó e iniciarla automáticamente
+                    startGameIfFull(gameId)
                 }
 
                 call.respondText("Te has unido a la partida", status = HttpStatusCode.OK)
@@ -273,6 +366,8 @@ fun Route.gameRoutes() {
             } catch (e: IllegalStateException) {
                 call.respondText(e.message ?: "Error de validación", status = HttpStatusCode.BadRequest)
             } catch (e: Exception) {
+                println("❌ Error en /games/join: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
@@ -293,9 +388,15 @@ fun Route.gameRoutes() {
                     }
 
                     // Verificar si todos están listos para iniciar
-                    val players = GamePlayers.select(GamePlayers.gameId eq gameId).toList()
+                    val players = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
+                        .toList()
                     val allReady = players.all { it[GamePlayers.isReady] }
-                    val game = Games.select(Games.id eq gameId).single()
+                    val game = Games
+                        .selectAll()
+                        .where { Games.id eq gameId }
+                        .single()
                     val minPlayers = 2
 
                     if (allReady && players.count() >= minPlayers) {
@@ -308,7 +409,9 @@ fun Route.gameRoutes() {
                         }
 
                         // Repartir 3 cartas a cada jugador
-                        val deck = GameDecks.select(GameDecks.gameId eq gameId)
+                        val deck = GameDecks
+                            .selectAll()
+                            .where { GameDecks.gameId eq gameId }
                             .single()[GameDecks.deckCards]
                             .split(",")
                             .map { it.toInt() }
@@ -340,6 +443,8 @@ fun Route.gameRoutes() {
                 call.respondText("Listo para jugar", status = HttpStatusCode.OK)
 
             } catch (e: Exception) {
+                println("❌ Error en /games/ready: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
@@ -350,23 +455,27 @@ fun Route.gameRoutes() {
                 val gameId = UUID.fromString(call.parameters["gameId"])
 
                 val gameState = transaction {
-                    val game = Games.select(Games.id eq gameId).singleOrNull()
+                    val game = Games
+                        .selectAll()
+                        .where { Games.id eq gameId }
+                        .singleOrNull()
                         ?: throw NoSuchElementException("Partida no encontrada")
 
                     val players = GamePlayers
-                        .join(Users, JoinType.INNER, additionalConstraint = { GamePlayers.userId eq Users.id })
-                        .select(GamePlayers.gameId eq gameId)
+                        .innerJoin(Users)
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
                         .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
-                        .map {
+                        .map { playerRow ->
                             mapOf(
-                                "playerId" to it[GamePlayers.id].toString(),
-                                "userId" to it[GamePlayers.userId].toString(),
-                                "username" to it[Users.username],
-                                "character" to it[GamePlayers.character],
-                                "position" to it[GamePlayers.position],
-                                "isReady" to it[GamePlayers.isReady],
-                                "connected" to it[GamePlayers.connected],
-                                "playerIndex" to it[GamePlayers.playerIndex]
+                                "playerId" to playerRow[GamePlayers.id].toString(),
+                                "userId" to playerRow[GamePlayers.userId].toString(),
+                                "username" to playerRow[Users.username],
+                                "character" to playerRow[GamePlayers.character],
+                                "position" to playerRow[GamePlayers.position],
+                                "isReady" to playerRow[GamePlayers.isReady],
+                                "connected" to playerRow[GamePlayers.connected],
+                                "playerIndex" to playerRow[GamePlayers.playerIndex]
                             )
                         }
 
@@ -387,6 +496,8 @@ fun Route.gameRoutes() {
             } catch (e: NoSuchElementException) {
                 call.respondText("Partida no encontrada", status = HttpStatusCode.NotFound)
             } catch (e: Exception) {
+                println("❌ Error en GET /games/{gameId}: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
@@ -400,16 +511,20 @@ fun Route.gameRoutes() {
                 val gameId = UUID.fromString(req.gameId)
 
                 val result = transaction {
-                    val game = Games.select(Games.id eq gameId).singleOrNull()
+                    val game = Games
+                        .selectAll()
+                        .where { Games.id eq gameId }
+                        .singleOrNull()
                         ?: throw NoSuchElementException("Partida no encontrada")
 
                     if (game[Games.status] != "IN_PROGRESS") {
                         throw IllegalStateException("La partida no está en progreso")
                     }
 
-                    val player = GamePlayers.select(
-                        (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId)
-                    ).singleOrNull() ?: throw IllegalStateException("No estás en esta partida")
+                    val player = GamePlayers
+                        .selectAll()
+                        .where { (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId) }
+                        .singleOrNull() ?: throw IllegalStateException("No estás en esta partida")
 
                     if (player[GamePlayers.playerIndex] != game[Games.currentTurnIndex]) {
                         throw IllegalStateException("No es tu turno")
@@ -425,7 +540,10 @@ fun Route.gameRoutes() {
                     }
 
                     // Pasar turno
-                    val playerCount = GamePlayers.select(GamePlayers.gameId eq gameId).count()
+                    val playerCount = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
+                        .count()
                     val nextTurn = (game[Games.currentTurnIndex] + 1) % playerCount.toInt()
 
                     Games.update({ Games.id eq gameId }) {
@@ -446,6 +564,143 @@ fun Route.gameRoutes() {
             } catch (e: IllegalStateException) {
                 call.respondText(e.message ?: "Error", status = HttpStatusCode.BadRequest)
             } catch (e: Exception) {
+                println("❌ Error en /games/roll-dice: ${e.message}")
+                e.printStackTrace()
+                call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
+            }
+        }
+
+        // OBTENER PARTIDAS ACTIVAS DEL USUARIO
+        get("/active") {
+            try {
+                val principal = call.principal<JWTPrincipal>()
+                val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
+
+                val activeGames = transaction {
+                    // Buscar partidas donde el usuario es jugador y el estado no es FINISHED
+                    val userGames = GamePlayers
+                        .innerJoin(Games)
+                        .selectAll()
+                        .where { (GamePlayers.userId eq userId) and (Games.status neq "FINISHED") }
+                        .map { row ->
+                            val gameId = row[Games.id]
+
+                            // Obtener todos los jugadores de esta partida
+                            val players = GamePlayers
+                                .innerJoin(Users)
+                                .selectAll()
+                                .where { GamePlayers.gameId eq gameId }
+                                .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
+                                .map { playerRow ->
+                                    mapOf(
+                                        "id" to playerRow[GamePlayers.id].toString(),
+                                        "userId" to playerRow[GamePlayers.userId].toString(),
+                                        "username" to playerRow[Users.username],
+                                        "playerIndex" to playerRow[GamePlayers.playerIndex],
+                                        "character" to playerRow[GamePlayers.character],
+                                        "position" to playerRow[GamePlayers.position],
+                                        "isReady" to playerRow[GamePlayers.isReady],
+                                        "connected" to playerRow[GamePlayers.connected]
+                                    )
+                                }
+
+                            mapOf(
+                                "id" to gameId.toString(),
+                                "code" to row[Games.code],
+                                "maxPlayers" to row[Games.maxPlayers],
+                                "status" to row[Games.status],
+                                "isStarted" to row[Games.isStarted],
+                                "players" to players
+                            )
+                        }
+
+                    userGames
+                }
+
+                call.respond(activeGames)
+
+            } catch (e: Exception) {
+                println("❌ Error en /games/active: ${e.message}")
+                e.printStackTrace()
+                call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
+            }
+        }
+
+        // SALIR DE UNA PARTIDA
+        post("/{gameId}/leave") {
+            try {
+                val principal = call.principal<JWTPrincipal>()
+                val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
+                val gameId = UUID.fromString(call.parameters["gameId"])
+
+                val message = transaction {
+                    // Verificar que el usuario está en la partida
+                    val playerRecord = GamePlayers
+                        .selectAll()
+                        .where { (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId) }
+                        .singleOrNull()
+
+                    if (playerRecord == null) {
+                        throw IllegalStateException("No estás en esta partida")
+                    }
+
+                    val playerId = playerRecord[GamePlayers.id]
+
+                    // 1. Eliminar mano del jugador
+                    PlayerHands.deleteWhere {
+                        (PlayerHands.gameId eq gameId) and (PlayerHands.playerId eq playerId)
+                    }
+
+                    // 2. Eliminar al jugador de la partida
+                    GamePlayers.deleteWhere {
+                        (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId)
+                    }
+
+                    // 3. Verificar si quedan jugadores
+                    val remainingPlayers = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq gameId }
+                        .count()
+
+                    if (remainingPlayers == 0L) {
+                        // Si no quedan jugadores, eliminar la partida completa
+                        GameDecks.deleteWhere { GameDecks.gameId eq gameId }
+                        Games.deleteWhere { Games.id eq gameId }
+                        "Partida eliminada (eras el último jugador)"
+                    } else {
+                        // Si quedan jugadores, reorganizar índices
+                        val game = Games
+                            .selectAll()
+                            .where { Games.id eq gameId }
+                            .singleOrNull()
+
+                        if (game != null && game[Games.status] == "WAITING") {
+                            // Obtener jugadores restantes ordenados por índice
+                            val remainingPlayersList = GamePlayers
+                                .selectAll()
+                                .where { GamePlayers.gameId eq gameId }
+                                .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
+                                .toList()
+
+                            // Actualizar índices para que sean consecutivos
+                            remainingPlayersList.forEachIndexed { index, player ->
+                                GamePlayers.update({ GamePlayers.id eq player[GamePlayers.id] }) {
+                                    it[playerIndex] = index
+                                }
+                            }
+                        }
+                        "Has salido de la partida exitosamente"
+                    }
+                }
+
+                call.respondText(message, status = HttpStatusCode.OK)
+
+            } catch (e: IllegalStateException) {
+                println("❌ Error de validación en /games/{gameId}/leave: ${e.message}")
+                call.respondText(e.message ?: "Error de validación", status = HttpStatusCode.BadRequest)
+            } catch (e: Exception) {
+                println("❌ Error en /games/{gameId}/leave: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
@@ -458,13 +713,15 @@ fun Route.gameRoutes() {
                 val gameId = UUID.fromString(call.parameters["gameId"])
 
                 val hand = transaction {
-                    val player = GamePlayers.select(
-                        (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId)
-                    ).singleOrNull() ?: throw IllegalStateException("No estás en esta partida")
+                    val player = GamePlayers
+                        .selectAll()
+                        .where { (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId) }
+                        .singleOrNull() ?: throw IllegalStateException("No estás en esta partida")
 
-                    val playerHand = PlayerHands.select(
-                        (PlayerHands.gameId eq gameId) and (PlayerHands.playerId eq player[GamePlayers.id])
-                    ).singleOrNull()
+                    val playerHand = PlayerHands
+                        .selectAll()
+                        .where { (PlayerHands.gameId eq gameId) and (PlayerHands.playerId eq player[GamePlayers.id]) }
+                        .singleOrNull()
 
                     val cards = playerHand?.get(PlayerHands.cards)
                         ?.split(",")
@@ -477,21 +734,24 @@ fun Route.gameRoutes() {
                 call.respond(hand)
 
             } catch (e: Exception) {
+                println("❌ Error en /games/{gameId}/hand: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
 
         // LISTAR PARTIDAS DISPONIBLES
         get("/available") {
-
             try {
                 val games = transaction {
                     Games
-                        .select ( Games.status eq "WAITING" )
+                        .selectAll()
+                        .where { Games.status eq "WAITING" }
                         .mapNotNull { game ->
                             val gameId = game[Games.id]
                             val currentPlayers = GamePlayers
-                                .select ( GamePlayers.gameId eq gameId )
+                                .selectAll()
+                                .where { GamePlayers.gameId eq gameId }
                                 .count()
                             val maxPlayers = game[Games.maxPlayers]
 
@@ -507,10 +767,10 @@ fun Route.gameRoutes() {
                 }
                 call.respond(games)
             } catch (e: Exception) {
+                println("❌ Error en /games/available: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
-
-
         }
     }
 }
