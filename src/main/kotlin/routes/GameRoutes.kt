@@ -289,7 +289,7 @@ fun Route.gameRoutes() {
         }
 
         // UNIRSE POR CÓDIGO
-        post("c/join") {
+        post("/join") {
             try {
                 val principal = call.principal<JWTPrincipal>()
                 val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
