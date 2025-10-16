@@ -1,9 +1,7 @@
 package com.appsandgames34.routes
 
 import com.appsandgames34.modelos.*
-import com.appsandgames34.routes.GameConnectionManager
 import io.ktor.http.HttpStatusCode
-import io.ktor.server.application.*
 import io.ktor.server.auth.*
 import io.ktor.server.auth.jwt.*
 import io.ktor.server.request.*
@@ -94,14 +92,18 @@ fun Route.cardRoutes() {
                 }
 
                 // Notificar a todos los jugadores vía WebSocket
-                GameConnectionManager.broadcast(req.gameId, """
-                    {
-                        "type": "card_played",
-                        "userId": "$userId",
-                        "cardId": ${req.cardId},
-                        "timestamp": ${System.currentTimeMillis()}
-                    }
-                """.trimIndent())
+                GameConnectionManager.broadcast(
+                    req.gameId,
+                    """
+                        type = "card_played",
+                        userId = userId.toString(),
+                        cardId = req.cardId,
+                        timestamp = System.currentTimeMillis()"""
+
+                )
+
+
+                call.respond(result)
 
                 call.respond(result)
 

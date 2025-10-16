@@ -155,6 +155,8 @@ fun Route.gameRoutes() {
                         it[GameDecks.createdAt] = LocalDateTime.now()
                     }
                 }
+                GameConnectionManager.broadcastGameUpdate(newGameId.toString())
+
 
                 call.respond(mapOf("gameId" to newGameId, "code" to gameCode))
 
@@ -289,12 +291,12 @@ fun Route.gameRoutes() {
         }
 
         // UNIRSE POR CÓDIGO
-        post("/join") {
+        /*post("/join") {
             try {
                 val principal = call.principal<JWTPrincipal>()
                 val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
                 val req = call.receive<JoinByCodeRequest>()
-
+                var gameId: UUID? = null
                 transaction {
                     // Verificar si el usuario ya está en otra partida activa
                     val userInAnotherGame = GamePlayers
@@ -313,7 +315,7 @@ fun Route.gameRoutes() {
                         .singleOrNull()
                         ?: throw NoSuchElementException("Partida no encontrada")
 
-                    val gameId = game[Games.id]
+                    gameId = game[Games.id]
 
                     if (game[Games.status] != "WAITING") {
                         throw IllegalStateException("La partida ya ha comenzado")
@@ -357,7 +359,9 @@ fun Route.gameRoutes() {
 
                     // Verificar si la partida se llenó e iniciarla automáticamente
                     startGameIfFull(gameId)
+
                 }
+                GameConnectionManager.broadcastGameUpdate(gameId.toString())
 
                 call.respondText("Te has unido a la partida", status = HttpStatusCode.OK)
 
@@ -372,6 +376,143 @@ fun Route.gameRoutes() {
             }
         }
 
+         */
+// UNIRSE POR CÓDIGO (con auto-salida de partida anterior)
+        post("/join") {
+            try {
+                val principal = call.principal<JWTPrincipal>()
+                val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
+                val req = call.receive<JoinByCodeRequest>()
+                var newGameId: UUID? = null
+                val gamesToNotify = mutableSetOf<UUID>() // 🔹 guardará las partidas que necesitan broadcast
+
+                transaction {
+                    // 1. SALIR DE PARTIDAS ACTIVAS ANTERIORES
+                    val activeGames = GamePlayers
+                        .innerJoin(Games)
+                        .selectAll()
+                        .where { (GamePlayers.userId eq userId) and (Games.status neq "FINISHED") }
+                        .map { it[GamePlayers.gameId] to it[GamePlayers.id] }
+
+                    activeGames.forEach { (oldGameId, playerId) ->
+                        println("⚠️ Usuario $userId saliendo de partida anterior $oldGameId")
+
+                        // Eliminar mano del jugador
+                        PlayerHands.deleteWhere {
+                            (PlayerHands.gameId eq oldGameId) and (PlayerHands.playerId eq playerId)
+                        }
+
+                        // Eliminar jugador
+                        GamePlayers.deleteWhere {
+                            (GamePlayers.gameId eq oldGameId) and (GamePlayers.userId eq userId)
+                        }
+
+                        // Verificar si quedan jugadores
+                        val remainingPlayers = GamePlayers
+                            .selectAll()
+                            .where { GamePlayers.gameId eq oldGameId }
+                            .count()
+
+                        if (remainingPlayers == 0L) {
+                            // Eliminar partida completa si no quedan jugadores
+                            GameDecks.deleteWhere { GameDecks.gameId eq oldGameId }
+                            Games.deleteWhere { Games.id eq oldGameId }
+                            println("🗑️ Partida $oldGameId eliminada (sin jugadores)")
+                        } else {
+                            // Reorganizar índices
+                            val remainingPlayersList = GamePlayers
+                                .selectAll()
+                                .where { GamePlayers.gameId eq oldGameId }
+                                .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
+                                .toList()
+
+                            remainingPlayersList.forEachIndexed { index, player ->
+                                GamePlayers.update({ GamePlayers.id eq player[GamePlayers.id] }) {
+                                    it[playerIndex] = index
+                                }
+                            }
+
+                            // 🔹 Marcar para notificar después
+                            gamesToNotify.add(oldGameId)
+                        }
+                    }
+
+                    // 2. UNIRSE A LA NUEVA PARTIDA
+                    val game = Games
+                        .selectAll()
+                        .where { Games.code eq req.code.uppercase() }
+                        .singleOrNull()
+                        ?: throw NoSuchElementException("Partida no encontrada")
+
+                    newGameId = game[Games.id]
+
+                    if (game[Games.status] != "WAITING") {
+                        throw IllegalStateException("La partida ya ha comenzado")
+                    }
+
+                    val playerCount = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq newGameId }
+                        .count()
+
+                    if (playerCount >= game[Games.maxPlayers]) {
+                        throw IllegalStateException("La partida está llena")
+                    }
+
+                    val usedIndices = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq newGameId }
+                        .map { it[GamePlayers.playerIndex] }
+
+                    val usedCharacters = GamePlayers
+                        .selectAll()
+                        .where { GamePlayers.gameId eq newGameId }
+                        .map { it[GamePlayers.character] }
+
+                    val availableIndex = (0 until game[Games.maxPlayers]).firstOrNull { it !in usedIndices }
+                        ?: throw IllegalStateException("No hay índices disponibles")
+
+                    val availableCharacter = (1..6).firstOrNull { it !in usedCharacters }
+                        ?: throw IllegalStateException("No hay personajes disponibles")
+
+                    GamePlayers.insert {
+                        it[GamePlayers.id] = UUID.randomUUID()
+                        it[GamePlayers.gameId] = newGameId
+                        it[GamePlayers.userId] = userId
+                        it[GamePlayers.playerIndex] = availableIndex
+                        it[GamePlayers.character] = availableCharacter
+                        it[GamePlayers.position] = 1
+                        it[GamePlayers.isReady] = false
+                        it[GamePlayers.connected] = true
+                        it[GamePlayers.createdAt] = LocalDateTime.now()
+                    }
+
+                    // Verificar si la partida se llenó e iniciarla automáticamente
+                    startGameIfFull(newGameId!!)
+                }
+                // 🔹 Fuera del transaction: ahora sí podemos usar funciones suspendidas
+                for (oldGameId in gamesToNotify) {
+                    GameConnectionManager.broadcastGameUpdate(oldGameId.toString())
+                }
+
+                // Notificar actualización en la nueva partida
+                GameConnectionManager.broadcastGameUpdate(newGameId.toString())
+
+                call.respond(mapOf(
+                    "message" to "Te has unido a la partida",
+                    "gameId" to newGameId.toString()
+                ))
+
+            } catch (e: NoSuchElementException) {
+                call.respondText(e.message ?: "Partida no encontrada", status = HttpStatusCode.NotFound)
+            } catch (e: IllegalStateException) {
+                call.respondText(e.message ?: "Error de validación", status = HttpStatusCode.BadRequest)
+            } catch (e: Exception) {
+                println("❌ Error en /games/join: ${e.message}")
+                e.printStackTrace()
+                call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
+            }
+        }
         // MARCAR JUGADOR COMO LISTO
         post("/ready") {
             try {
@@ -439,6 +580,7 @@ fun Route.gameRoutes() {
                         }
                     }
                 }
+                GameConnectionManager.broadcastGameUpdate(gameId.toString())
 
                 call.respondText("Listo para jugar", status = HttpStatusCode.OK)
 
@@ -558,7 +700,7 @@ fun Route.gameRoutes() {
                         "newPosition" to newPosition
                     )
                 }
-
+                GameConnectionManager.broadcastGameUpdate(gameId.toString())
                 call.respond(result)
 
             } catch (e: IllegalStateException) {
@@ -593,7 +735,7 @@ fun Route.gameRoutes() {
                                 .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
                                 .map { playerRow ->
                                     mapOf(
-                                        "id" to playerRow[GamePlayers.id].toString(),
+                                        "playerId" to playerRow[GamePlayers.id].toString(),
                                         "userId" to playerRow[GamePlayers.userId].toString(),
                                         "username" to playerRow[Users.username],
                                         "playerIndex" to playerRow[GamePlayers.playerIndex],
@@ -610,6 +752,7 @@ fun Route.gameRoutes() {
                                 "maxPlayers" to row[Games.maxPlayers],
                                 "status" to row[Games.status],
                                 "isStarted" to row[Games.isStarted],
+                                "currentTurnIndex" to row[Games.currentTurnIndex],
                                 "players" to players
                             )
                         }
@@ -692,6 +835,7 @@ fun Route.gameRoutes() {
                         "Has salido de la partida exitosamente"
                     }
                 }
+                GameConnectionManager.broadcastGameUpdate(gameId.toString())
 
                 call.respondText(message, status = HttpStatusCode.OK)
 
@@ -730,7 +874,7 @@ fun Route.gameRoutes() {
 
                     mapOf("cards" to cards)
                 }
-
+                GameConnectionManager.broadcastGameUpdate(gameId.toString())
                 call.respond(hand)
 
             } catch (e: Exception) {
