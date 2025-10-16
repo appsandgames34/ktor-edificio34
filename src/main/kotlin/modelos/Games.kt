@@ -12,6 +12,7 @@ object Games : Table("games") {
     val status = varchar("status", 20) // WAITING, IN_PROGRESS, FINISHED
     val currentTurnIndex = integer("current_turn_index").default(0)
     val boardSize = integer("board_size").default(112)
+    val isPublic = bool("is_public").default(false) // Nueva: para diferenciar partidas públicas/privadas
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at").nullable()
     val isStarted = bool("is_started").default(false)

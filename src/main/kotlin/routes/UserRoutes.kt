@@ -1,6 +1,7 @@
 package com.appsandgames34.routes
 
 import com.appsandgames34.modelos.Users
+import com.appsandgames34.modelos.UserSessions
 import com.appsandgames34.util.JwtConfig
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
@@ -17,7 +18,7 @@ import java.time.LocalDateTime
 import java.util.*
 
 data class RegisterRequest(val username: String, val email: String, val password: String)
-data class LoginRequest(val username: String, val password: String)
+data class LoginRequest(val username: String, val password: String, val deviceId: String? = null)
 
 fun Route.userRoutes() {
     route("/users") {
@@ -75,13 +76,13 @@ fun Route.userRoutes() {
             }
         }
 
-        // LOGIN
+        // LOGIN (con gestión de sesiones)
         post("/login") {
             try {
                 val req = call.receive<LoginRequest>()
-              val user = transaction {
-                    // 1. Usar selectAll() para traer todas las columnas de Users.
-                    // 2. Usar where para filtrar.
+                val deviceId = req.deviceId ?: UUID.randomUUID().toString() // Generar deviceId si no se proporciona
+
+                val user = transaction {
                     Users.selectAll()
                         .where { Users.username eq req.username }
                         .map { row ->
@@ -99,11 +100,44 @@ fun Route.userRoutes() {
 
                     // Verificar contraseña con BCrypt
                     if (BCrypt.checkpw(req.password, passwordHash)) {
+
+                        // Verificar si el usuario ya tiene una sesión activa
+                        val activeSession = transaction {
+                            UserSessions.selectAll()
+                                .where { UserSessions.userId eq userId }
+                                .singleOrNull()
+                        }
+
+                        if (activeSession != null) {
+                            // Hay sesión activa → invalidar sesión anterior
+                            transaction {
+                                UserSessions.deleteWhere { UserSessions.userId eq userId }
+                            }
+                            println("⚠️ Sesión anterior de usuario $username invalidada")
+                        }
+
+                        // Crear nuevo token
                         val token = JwtConfig.generateToken(userId, username)
+
+                        // Crear nueva sesión
+                        transaction {
+                            UserSessions.insert {
+                                it[UserSessions.id] = UUID.randomUUID()
+                                it[UserSessions.userId] = userId
+                                it[UserSessions.deviceId] = deviceId
+                                it[UserSessions.token] = token
+                                it[UserSessions.lastActivityAt] = LocalDateTime.now()
+                                it[UserSessions.createdAt] = LocalDateTime.now()
+                            }
+                        }
+
+                        println("✅ Nuevo login de $username desde dispositivo $deviceId")
+
                         call.respond(mapOf(
                             "token" to token,
                             "userId" to userId.toString(),
-                            "username" to username
+                            "username" to username,
+                            "sessionCreated" to true
                         ))
                     } else {
                         call.respondText("Credenciales inválidas", status = HttpStatusCode.Unauthorized)
@@ -113,7 +147,33 @@ fun Route.userRoutes() {
                 }
 
             } catch (e: Exception) {
+                println("❌ Error en el login: ${e.message}")
+                e.printStackTrace()
                 call.respondText("Error en el login: ${e.message}", status = HttpStatusCode.InternalServerError)
+            }
+        }
+
+        // LOGOUT
+        post("/logout") {
+            try {
+                val principal = call.principal<JWTPrincipal>()
+                val userId = UUID.fromString(principal?.payload?.getClaim("userId")?.asString())
+
+                val deleted = transaction {
+                    UserSessions.deleteWhere { UserSessions.userId eq userId }
+                }
+
+                if (deleted > 0) {
+                    println("✅ Sesión de usuario $userId cerrada")
+                    call.respondText("Sesión cerrada exitosamente", status = HttpStatusCode.OK)
+                } else {
+                    call.respondText("No hay sesión activa", status = HttpStatusCode.NotFound)
+                }
+
+            } catch (e: Exception) {
+                println("❌ Error en logout: ${e.message}")
+                e.printStackTrace()
+                call.respondText("Error al cerrar sesión: ${e.message}", status = HttpStatusCode.InternalServerError)
             }
         }
 

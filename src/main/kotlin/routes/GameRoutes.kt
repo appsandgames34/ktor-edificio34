@@ -85,6 +85,17 @@ private fun startGameIfFull(gameId: UUID) {
         }
 
         println("✅ Partida iniciada automáticamente!")
+
+        // Notificar que la partida ha iniciado
+        kotlinx.coroutines.GlobalScope.launch {
+            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                {
+                    "type": "game_started",
+                    "gameId": "$gameId",
+                    "timestamp": ${System.currentTimeMillis()}
+                }
+            """.trimIndent())
+        }
     }
 }
 
@@ -126,6 +137,7 @@ fun Route.gameRoutes() {
                         it[Games.id] = newGameId
                         it[Games.code] = gameCode
                         it[Games.maxPlayers] = req.maxPlayers
+                        it[Games.isPublic] = false // Partida privada
                         it[Games.isStarted] = false
                         it[Games.status] = "WAITING"
                         it[Games.createdAt] = LocalDateTime.now()
@@ -154,6 +166,19 @@ fun Route.gameRoutes() {
                         it[GameDecks.discard] = ""
                         it[GameDecks.createdAt] = LocalDateTime.now()
                     }
+                }
+
+                // Notificar creación de partida via WebSocket
+                kotlinx.coroutines.GlobalScope.launch {
+                    GameConnectionManager.broadcastToGame(newGameId.toString(), """
+                        {
+                            "type": "game_created",
+                            "gameId": "$newGameId",
+                            "code": "$gameCode",
+                            "maxPlayers": ${req.maxPlayers},
+                            "timestamp": ${System.currentTimeMillis()}
+                        }
+                    """.trimIndent())
                 }
 
                 call.respond(mapOf("gameId" to newGameId, "code" to gameCode))
@@ -236,6 +261,18 @@ fun Route.gameRoutes() {
                         // Verificar si la partida se llenó e iniciarla automáticamente
                         startGameIfFull(gameId)
 
+                        // Notificar que un jugador se unió
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "player_joined",
+                                    "gameId": "$gameId",
+                                    "userId": "$userId",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
+                        }
+
                         mapOf("gameId" to gameId.toString(), "code" to gameCode, "created" to false)
                     } else {
                         // Crear nueva partida pública
@@ -246,6 +283,7 @@ fun Route.gameRoutes() {
                             it[Games.id] = newGameId
                             it[Games.code] = gameCode
                             it[Games.maxPlayers] = 6 // Partidas públicas son de 6 jugadores por defecto
+                            it[Games.isPublic] = true // Partida pública
                             it[Games.isStarted] = false
                             it[Games.status] = "WAITING"
                             it[Games.createdAt] = LocalDateTime.now()
@@ -357,6 +395,18 @@ fun Route.gameRoutes() {
 
                     // Verificar si la partida se llenó e iniciarla automáticamente
                     startGameIfFull(gameId)
+
+                    // Notificar que un jugador se unió
+                    kotlinx.coroutines.GlobalScope.launch {
+                        GameConnectionManager.broadcastToGame(gameId.toString(), """
+                            {
+                                "type": "player_joined",
+                                "gameId": "$gameId",
+                                "userId": "$userId",
+                                "timestamp": ${System.currentTimeMillis()}
+                            }
+                        """.trimIndent())
+                    }
                 }
 
                 call.respondText("Te has unido a la partida", status = HttpStatusCode.OK)
@@ -380,12 +430,35 @@ fun Route.gameRoutes() {
                 val req = call.receive<ReadyRequest>()
                 val gameId = UUID.fromString(req.gameId)
 
-                transaction {
+                val playerId = transaction {
+                    val player = GamePlayers
+                        .selectAll()
+                        .where { (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId) }
+                        .singleOrNull() ?: throw IllegalStateException("No estás en esta partida")
+
                     GamePlayers.update({
                         (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId)
                     }) {
                         it[isReady] = true
                     }
+
+                    player[GamePlayers.id]
+                }
+
+                // Notificar que el jugador está listo
+                kotlinx.coroutines.GlobalScope.launch {
+                    GameConnectionManager.broadcastToGame(gameId.toString(), """
+                        {
+                            "type": "player_ready",
+                            "gameId": "$gameId",
+                            "playerId": "$playerId",
+                            "userId": "$userId",
+                            "timestamp": ${System.currentTimeMillis()}
+                        }
+                    """.trimIndent())
+                }
+
+                transaction {
 
                     // Verificar si todos están listos para iniciar
                     val players = GamePlayers
@@ -436,6 +509,17 @@ fun Route.gameRoutes() {
                         // Actualizar mazo
                         GameDecks.update({ GameDecks.gameId eq gameId }) {
                             it[deckCards] = deck.joinToString(",")
+                        }
+
+                        // Notificar que la partida ha iniciado
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "game_started",
+                                    "gameId": "$gameId",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
                         }
                     }
                 }
@@ -551,6 +635,23 @@ fun Route.gameRoutes() {
                         it[updatedAt] = LocalDateTime.now()
                     }
 
+                    // Notificar movimiento del jugador
+                    kotlinx.coroutines.GlobalScope.launch {
+                        GameConnectionManager.broadcastToGame(gameId.toString(), """
+                            {
+                                "type": "player_moved",
+                                "gameId": "$gameId",
+                                "playerId": "${player[GamePlayers.id]}",
+                                "userId": "$userId",
+                                "diceRoll": [$dice1, $dice2],
+                                "total": $total,
+                                "newPosition": $newPosition,
+                                "nextTurnIndex": $nextTurn,
+                                "timestamp": ${System.currentTimeMillis()}
+                            }
+                        """.trimIndent())
+                    }
+
                     mapOf(
                         "dice1" to dice1,
                         "dice2" to dice2,
@@ -626,7 +727,7 @@ fun Route.gameRoutes() {
             }
         }
 
-        // SALIR DE UNA PARTIDA
+        // SALIR DE UNA PARTIDA (Lógica mejorada)
         post("/{gameId}/leave") {
             try {
                 val principal = call.principal<JWTPrincipal>()
@@ -645,18 +746,34 @@ fun Route.gameRoutes() {
                     }
 
                     val playerId = playerRecord[GamePlayers.id]
+                    val playerIndex = playerRecord[GamePlayers.playerIndex]
+                    val isCreator = playerIndex == 0
+
+                    // Obtener información de la partida
+                    val game = Games
+                        .selectAll()
+                        .where { Games.id eq gameId }
+                        .singleOrNull() ?: throw IllegalStateException("Partida no encontrada")
+
+                    val isPublic = game[Games.isPublic]
+                    val gameStatus = game[Games.status]
 
                     // 1. Eliminar mano del jugador
                     PlayerHands.deleteWhere {
                         (PlayerHands.gameId eq gameId) and (PlayerHands.playerId eq playerId)
                     }
 
-                    // 2. Eliminar al jugador de la partida
+                    // 2. Eliminar efectos del jugador
+                    PlayerEffects.deleteWhere {
+                        PlayerEffects.playerId eq playerId
+                    }
+
+                    // 3. Eliminar al jugador de la partida
                     GamePlayers.deleteWhere {
                         (GamePlayers.gameId eq gameId) and (GamePlayers.userId eq userId)
                     }
 
-                    // 3. Verificar si quedan jugadores
+                    // 4. Verificar si quedan jugadores
                     val remainingPlayers = GamePlayers
                         .selectAll()
                         .where { GamePlayers.gameId eq gameId }
@@ -664,31 +781,124 @@ fun Route.gameRoutes() {
 
                     if (remainingPlayers == 0L) {
                         // Si no quedan jugadores, eliminar la partida completa
+                        ChatMessages.deleteWhere { ChatMessages.gameId eq gameId }
                         GameDecks.deleteWhere { GameDecks.gameId eq gameId }
                         Games.deleteWhere { Games.id eq gameId }
+
+                        // Notificar eliminación de partida
                         "Partida eliminada (eras el último jugador)"
-                    } else {
-                        // Si quedan jugadores, reorganizar índices
-                        val game = Games
+                    } else if (isCreator && !isPublic && gameStatus == "WAITING") {
+                        // Creador de partida PRIVADA abandona en WAITING → eliminar partida
+                        ChatMessages.deleteWhere { ChatMessages.gameId eq gameId }
+
+                        val allPlayers = GamePlayers
                             .selectAll()
-                            .where { Games.id eq gameId }
-                            .singleOrNull()
+                            .where { GamePlayers.gameId eq gameId }
+                            .toList()
 
-                        if (game != null && game[Games.status] == "WAITING") {
-                            // Obtener jugadores restantes ordenados por índice
-                            val remainingPlayersList = GamePlayers
-                                .selectAll()
-                                .where { GamePlayers.gameId eq gameId }
-                                .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
-                                .toList()
-
-                            // Actualizar índices para que sean consecutivos
-                            remainingPlayersList.forEachIndexed { index, player ->
-                                GamePlayers.update({ GamePlayers.id eq player[GamePlayers.id] }) {
-                                    it[playerIndex] = index
-                                }
+                        allPlayers.forEach { player ->
+                            PlayerHands.deleteWhere {
+                                (PlayerHands.gameId eq gameId) and (PlayerHands.playerId eq player[GamePlayers.id])
+                            }
+                            PlayerEffects.deleteWhere {
+                                PlayerEffects.playerId eq player[GamePlayers.id]
                             }
                         }
+
+                        GamePlayers.deleteWhere { GamePlayers.gameId eq gameId }
+                        GameDecks.deleteWhere { GameDecks.gameId eq gameId }
+                        Games.deleteWhere { Games.id eq gameId }
+
+                        // Notificar a todos que la partida fue eliminada
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "game_deleted",
+                                    "gameId": "$gameId",
+                                    "reason": "host_left",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
+                        }
+
+                        "Partida eliminada (creador abandonó partida privada)"
+                    } else if (isPublic && gameStatus == "WAITING") {
+                        // Partida PÚBLICA en WAITING → mantener partida, reorganizar índices
+                        val remainingPlayersList = GamePlayers
+                            .selectAll()
+                            .where { GamePlayers.gameId eq gameId }
+                            .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
+                            .toList()
+
+                        // Actualizar índices para que sean consecutivos
+                        remainingPlayersList.forEachIndexed { index, player ->
+                            GamePlayers.update({ GamePlayers.id eq player[GamePlayers.id] }) {
+                                it[GamePlayers.playerIndex] = index
+                            }
+                        }
+
+                        // Notificar que un jugador salió
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "player_left",
+                                    "gameId": "$gameId",
+                                    "playerId": "$playerId",
+                                    "userId": "$userId",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
+                        }
+
+                        "Has salido de la partida pública exitosamente"
+                    } else if (gameStatus == "IN_PROGRESS") {
+                        // Partida en progreso → marcar jugador como desconectado
+                        GamePlayers.update({ GamePlayers.id eq playerId }) {
+                            it[GamePlayers.connected] = false
+                        }
+
+                        // Notificar desconexión
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "player_disconnected_ingame",
+                                    "gameId": "$gameId",
+                                    "playerId": "$playerId",
+                                    "userId": "$userId",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
+                        }
+
+                        "Has abandonado la partida en progreso"
+                    } else {
+                        // Partida privada en WAITING (no eres creador) → salir normalmente
+                        val remainingPlayersList = GamePlayers
+                            .selectAll()
+                            .where { GamePlayers.gameId eq gameId }
+                            .orderBy(GamePlayers.playerIndex to SortOrder.ASC)
+                            .toList()
+
+                        // Reorganizar índices
+                        remainingPlayersList.forEachIndexed { index, player ->
+                            GamePlayers.update({ GamePlayers.id eq player[GamePlayers.id] }) {
+                                it[GamePlayers.playerIndex] = index
+                            }
+                        }
+
+                        // Notificar
+                        kotlinx.coroutines.GlobalScope.launch {
+                            GameConnectionManager.broadcastToGame(gameId.toString(), """
+                                {
+                                    "type": "player_left",
+                                    "gameId": "$gameId",
+                                    "playerId": "$playerId",
+                                    "userId": "$userId",
+                                    "timestamp": ${System.currentTimeMillis()}
+                                }
+                            """.trimIndent())
+                        }
+
                         "Has salido de la partida exitosamente"
                     }
                 }

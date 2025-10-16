@@ -23,8 +23,8 @@ fun Application.configureDatabases() {
         // 1. Crear tablas independientes primero
         SchemaUtils.create(Users, Games, Cards, BoardSquares)
 
-        // 2. Crear tablas que dependen de las anteriores
-        SchemaUtils.create(GamePlayers)
+        // 2. Crear tablas que dependen de Users
+        SchemaUtils.create(UserSessions, GamePlayers)
 
         // 3. Crear el resto de tablas
         SchemaUtils.create(ChatMessages, GameDecks, PlayerHands, PlayerEffects)
